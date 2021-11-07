@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:int="http://www.springframework.org/schema/integration"
+       xmlns:jdbc="http://www.springframework.org/schema/jdbc"
+       xmlns:int-jdbc="http://www.springframework.org/schema/integration/jdbc"
+       xmlns:int-http="http://www.springframework.org/schema/integration/http"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+       http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd
+       http://www.springframework.org/schema/integration http://www.springframework.org/schema/integration/spring-integration.xsd
+       http://www.springframework.org/schema/integration/jdbc http://www.springframework.org/schema/integration/jdbc/spring-integration-jdbc.xsd
+       http://www.springframework.org/schema/integration/http http://www.springframework.org/schema/integration/http/spring-integration-http.xsd
+       http://www.springframework.org/schema/jdbc http://www.springframework.org/schema/jdbc/spring-jdbc-3.0.xsd">
+
+    <jdbc:embedded-database id="datasource" type="H2">
+        <jdbc:script location="classpath:setup.sql"/>
+    </jdbc:embedded-database>
+
+    <!-- Person (JDBC Datasource - CRUD) -->
+
+    <bean id="personResultMapper" class="com.example.dbintegration.domain.PersonMapper"/>
+
+    <int:channel id="createPersonRequestChannel"/>
+    <int:channel id="createPersonReplyChannel"/>
+    <int:channel id="findPersonRequestChannel"/>
+    <int:channel id="findPersonReplyChannel"/>
+
+    <int:gateway id="personRequestGateway" service-interface="com.example.dbintegration.service.PersonService">
+        <int:method name="createPerson"
+                    request-channel="createPersonRequestChannel"
+                    request-timeout="5000"
+                    reply-channel="createPersonReplyChannel"
+                    reply-timeout="0"/>
+        <int:method name="findPersonByName"
+                    request-channel="findPersonRequestChannel"
+                    request-timeout="5000"
+                    reply-channel="findPersonReplyChannel"
+                    reply-timeout="0"/>
+    </int:gateway>
+
+    <int-jdbc:outbound-gateway data-source="datasource"
+                               requires-reply="false"
+                               request-channel="findPersonRequestChannel"
+                               query="select * from Person where lower(name)=lower(:payload)"
+                               update=""
+                               reply-channel="findPersonReplyChannel"
+                               row-mapper="personResultMapper"
+                               max-rows="100">
+    </int-jdbc:outbound-gateway>
+
+    <int-jdbc:outbound-gateway data-source="datasource"
+                               request-channel="createPersonRequestChannel"
+                               reply-channel="createPersonReplyChannel"
+                               update="insert into Person (name,gender,dateOfBirth)
+										values
+										(:name,:gender,:dateOfBirth)"
+                               query="select * from Person where id = :id"
+                               request-sql-parameter-source-factory="requestSource"
+                               reply-sql-parameter-source-factory="replySource"
+                               row-mapper="personResultMapper"
+                               keys-generated="true"/>
+
+    <bean id="replySource" class="org.springframework.integration.jdbc.ExpressionEvaluatingSqlParameterSourceFactory">
+        <property name="parameterExpressions">
+            <map>
+                <entry key="id" value="#this.ID"/>
+            </map>
+        </property>
+    </bean>
+
+    <bean id="requestSource" class="org.springframework.integration.jdbc.ExpressionEvaluatingSqlParameterSourceFactory">
+        <property name="parameterExpressions">
+            <map>
+                <entry key="name" value="payload.name.toUpperCase()"/>
+                <entry key="gender" value="payload.gender.identifier"/>
+                <entry key="dateOfBirth" value="payload.dateOfBirth"/>
+            </map>
+        </property>
+    </bean>
+
+    <!-- Item (Communicate with third-party API) -->
+
+    <int:channel id="getItemsRequestChannel"/>
+    <int:channel id="getItemsResponseChannel"/>
+    <int:channel id="createItemRequestChannel"/>
+    <int:channel id="createItemResponseChannel"/>
+
+    <int:gateway id="itemRequestGateway"
+                 service-interface="com.example.dbintegration.service.ItemService">
+        <int:method name="getItems"
+                    request-channel="getItemsRequestChannel"
+                    request-timeout="5000"
+                    reply-channel="getItemsResponseChannel"
+                    reply-timeout="0"/>
+        <int:method name="createItem"
+                    request-channel="createItemRequestChannel"
+                    request-timeout="5000"
+                    reply-channel="createItemResponseChannel"
+                    reply-timeout="0"/>
+    </int:gateway>
+
+    <int-http:outbound-gateway request-channel="getItemsRequestChannel"
+                               reply-channel="getItemsResponseChannel"
+                               url="http://localhost:8082/items"
+                               http-method="GET"
+                               expected-response-type-expression="T (com.example.dbintegration.service.PersonService).itemParameterizedTypeReference()" />
+
+    <int-http:outbound-gateway request-channel="createItemRequestChannel"
+                               url="http://localhost:8082/item"
+                               http-method="POST"
+                               reply-channel="createItemResponseChannel"
+                               expected-response-type="com.example.dbintegration.domain.Item" />
+
+    <!-- Database Poller -->
+
+    <int:channel id="itemChannel"/>
+
+    <int:service-activator input-channel="itemChannel"
+                           ref="jdbcMessageHandler" />
+
+    <int-jdbc:inbound-channel-adapter
+            channel="itemChannel" data-source="datasource"
+            query="SELECT * FROM Items WHERE INVENTORY_STATUS = 0"
+            update="UPDATE Items SET INVENTORY_STATUS = 1">
+        <int:poller fixed-delay="5000" />
+    </int-jdbc:inbound-channel-adapter>
+
+</beans>
